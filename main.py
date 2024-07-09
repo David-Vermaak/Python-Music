@@ -1,24 +1,25 @@
+from kivy.clock import Clock
 from kivy.core.audio import SoundLoader
 from kivy.uix.boxlayout import BoxLayout
-from kivymd.uix.button import MDFlatButton
 from kivy.uix.gridlayout import GridLayout
 from kivy.uix.image import AsyncImage
 from kivy.uix.scrollview import ScrollView
 from kivy.utils import get_color_from_hex
 from kivymd.app import MDApp
+from kivymd.uix.button import MDFlatButton
 from kivymd.uix.button import MDIconButton
 from kivymd.uix.card import MDCard
 from kivymd.uix.label import MDLabel
 from mutagen import File
 from mutagen.id3 import ID3, APIC
-from mutagen.oggvorbis import OggVorbis
 from mutagen.mp3 import MP3
-from mutagen.oggopus import OggOpus
+from mutagen.oggvorbis import OggVorbis
 from plyer import filechooser
 from tempfile import NamedTemporaryFile
+import base64
 import json
 import os
-import base64
+import random
 
 
 class MusicLibrary:
@@ -69,7 +70,10 @@ class MusicPlayer(BoxLayout):
         self.sound = None
         self.library = MusicLibrary()
         self.current_song = None
-        
+        self.paused_position = 0  # Track the position when paused
+        self.is_paused = False
+        self.shuffle_mode = False
+        self.play_queue = []  # Queue to manage song play order
 
         # Create now playing section
         self.now_playing = MDCard(
@@ -118,16 +122,12 @@ class MusicPlayer(BoxLayout):
 
         # Add now playing section to the layout
         self.add_widget(self.now_playing)
+    
 
-        # Create UI elements with icons
-        self.title = MDLabel(
-            text='Python Music Player',
-            font_style='H5',
-            halign='center',
-            theme_text_color="Custom",
-            text_color=get_color_from_hex("#FFFFFF")
-        )
+        # Horizontal layout for buttons
+        button_layout = BoxLayout(orientation='horizontal')
 
+        # Initialize buttons
         self.add_music_button = MDIconButton(
             icon="plus",
             on_press=self.add_music,
@@ -142,13 +142,29 @@ class MusicPlayer(BoxLayout):
             text_color=get_color_from_hex("#FFFFFF"),
             md_bg_color=get_color_from_hex("#0D47A1")
         )
-        self.stop_button = MDIconButton(
-            icon="stop",
-            on_press=self.stop_music,
+        self.next_button = MDIconButton(
+            icon="skip-next",
+            on_press=self.next_song,
             theme_text_color="Custom",
             text_color=get_color_from_hex("#FFFFFF"),
             md_bg_color=get_color_from_hex("#0D47A1")
         )
+        shuffle_button = MDIconButton(
+            icon="shuffle-variant",
+            on_press=self.shuffle_songs,
+            theme_text_color="Custom",
+            text_color=get_color_from_hex("#FFFFFF"),
+            md_bg_color=get_color_from_hex("#0D47A1")
+        )
+
+        # Add buttons to horizontal layout
+        button_layout.add_widget(self.add_music_button)
+        button_layout.add_widget(self.play_pause_button)
+        button_layout.add_widget(self.next_button)
+        button_layout.add_widget(shuffle_button)
+
+        # Add horizontal button layout to vertical MusicPlayer layout
+        self.add_widget(button_layout)
 
         self.song_table_view = ScrollView(size_hint=(1, 1))
         self.song_table = GridLayout(cols=4, spacing=10, size_hint_y=None)
@@ -156,15 +172,66 @@ class MusicPlayer(BoxLayout):
         self.song_table_view.add_widget(self.song_table)
 
         # Add UI elements to layout
-        self.add_widget(self.add_music_button)
-        self.add_widget(self.play_pause_button)
-        self.add_widget(self.stop_button)
-
-        # Add UI elements to layout
         self.add_widget(self.song_table_view)
 
         # Populate the song table
         self.update_song_table()
+
+    def add_to_queue(self, song):
+        self.play_queue.append(song)
+        if len(self.play_queue) == 1:
+            self.play_song()
+
+    def play_pause_music(self, instance):
+
+        if self.sound:
+            if self.sound.state == 'play':
+                self.paused_position = self.sound.get_pos()
+                self.sound.stop()
+                self.is_paused = True
+                self.play_pause_button.icon = "play"
+            else:
+                if self.is_paused:
+                    self.sound.seek(self.paused_position)
+                    self.sound.play()
+                else:
+                    self.play_song()
+                self.is_paused = False
+                self.play_pause_button.icon = "pause"
+        elif self.play_queue:
+            self.play_song()
+            self.is_paused = False
+            self.play_pause_button.icon = "pause"
+
+    def play_song(self):
+        if self.play_queue:
+            self.current_song = self.play_queue.pop(0)
+            metadata = self.get_song_metadata(self.current_song)
+            self.now_playing_title.text = metadata['title']
+            self.now_playing_artist.text = metadata['artist']
+            self.now_playing_album.text = metadata['album']
+
+            if self.sound:
+                self.sound.stop()
+                self.sound.unload()
+
+            self.sound = SoundLoader.load(self.current_song)
+            if self.sound:
+                self.sound.bind(on_stop=lambda instance: self.play_song())
+                if self.is_paused:
+                    self.sound.seek(self.paused_position)
+                self.sound.play()
+                self.play_pause_button.icon = "pause"
+                self.is_paused = False 
+
+    def shuffle_songs(self, instance):
+        random.shuffle(self.library.songs)
+        self.shuffle_mode = True
+        self.update_play_queue()
+
+    def update_play_queue(self):
+        self.play_queue = list(self.library.songs)  # Reset queue to original or shuffled list
+        self.play_song()  # Start playing the first song in the updated queue
 
     def get_song_metadata(self, song_path):
         try:
@@ -310,7 +377,7 @@ class MusicPlayer(BoxLayout):
         for song in self.library.songs:
             song_info = self.get_song_info(song)
             title_button = MDFlatButton(text=song_info['title'], size_hint_y=None, height=40)
-            title_button.bind(on_press=lambda x, s=song: self.select_song(s))
+            title_button.bind(on_press=lambda x, s=song: self.add_to_queue(s))
             self.song_table.add_widget(title_button)
 
             artist_label = MDLabel(text=song_info['artist'], halign='center')
@@ -322,25 +389,9 @@ class MusicPlayer(BoxLayout):
             duration_label = MDLabel(text=str(song_info['duration']), halign='center')
             self.song_table.add_widget(duration_label)
 
-    def select_song(self, song):
-        self.current_song = song
-        metadata = self.get_song_metadata(song)
-        self.now_playing_title.text = metadata['title']
-        self.now_playing_artist.text = metadata['artist']
-        self.now_playing_album.text = metadata['album']
-        self.stop_music(None)
-        self.play_pause_music(None)
-
-    def play_pause_music(self, instance):
-        if self.sound and self.sound.state == 'play':
-            self.sound.stop()
-            self.play_pause_button.icon = "play"
-        elif self.current_song:
-            if not self.sound:
-                self.sound = SoundLoader.load(self.current_song)
-            if self.sound:
-                self.sound.play()
-                self.play_pause_button.icon = "pause"
+    def next_song(self, instance):
+        if self.play_queue:
+            self.play_song()
 
     def stop_music(self, instance):
         if self.sound:
