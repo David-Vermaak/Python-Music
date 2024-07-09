@@ -1,5 +1,6 @@
 from kivy.core.audio import SoundLoader
 from kivy.uix.boxlayout import BoxLayout
+from kivymd.uix.button import MDFlatButton
 from kivy.uix.gridlayout import GridLayout
 from kivy.uix.image import AsyncImage
 from kivy.uix.scrollview import ScrollView
@@ -11,6 +12,8 @@ from kivymd.uix.label import MDLabel
 from mutagen import File
 from mutagen.id3 import ID3, APIC
 from mutagen.oggvorbis import OggVorbis
+from mutagen.mp3 import MP3
+from mutagen.oggopus import OggOpus
 from plyer import filechooser
 from tempfile import NamedTemporaryFile
 import json
@@ -66,6 +69,7 @@ class MusicPlayer(BoxLayout):
         self.sound = None
         self.library = MusicLibrary()
         self.current_song = None
+        
 
         # Create now playing section
         self.now_playing = MDCard(
@@ -117,7 +121,7 @@ class MusicPlayer(BoxLayout):
 
         # Create UI elements with icons
         self.title = MDLabel(
-            text='Simple Music Player',
+            text='Python Music Player',
             font_style='H5',
             halign='center',
             theme_text_color="Custom",
@@ -146,20 +150,21 @@ class MusicPlayer(BoxLayout):
             md_bg_color=get_color_from_hex("#0D47A1")
         )
 
-        # Create a scroll view for the song list
-        self.scroll_view = ScrollView(size_hint=(1, None), size=(400, 300))
-        self.song_list = GridLayout(cols=1, spacing=10, size_hint_y=None)
-        self.song_list.bind(minimum_height=self.song_list.setter('height'))
-        self.scroll_view.add_widget(self.song_list)
+        self.song_table_view = ScrollView(size_hint=(1, 1))
+        self.song_table = GridLayout(cols=4, spacing=10, size_hint_y=None)
+        self.song_table.bind(minimum_height=self.song_table.setter('height'))
+        self.song_table_view.add_widget(self.song_table)
 
         # Add UI elements to layout
         self.add_widget(self.add_music_button)
         self.add_widget(self.play_pause_button)
         self.add_widget(self.stop_button)
-        self.add_widget(self.scroll_view)
 
-        # Populate the song list
-        self.update_song_list()
+        # Add UI elements to layout
+        self.add_widget(self.song_table_view)
+
+        # Populate the song table
+        self.update_song_table()
 
     def get_song_metadata(self, song_path):
         try:
@@ -232,7 +237,7 @@ class MusicPlayer(BoxLayout):
         path = self.select_music_path()
         if path:
             self.library.add_path(path)
-            self.update_song_list()
+            self.update_song_table()
 
     def select_music_path(self):
         '''if platform == 'android':
@@ -249,20 +254,73 @@ class MusicPlayer(BoxLayout):
             print(f"Error selecting path: {e}")
             return None
 
-    def update_song_list(self):
-        self.song_list.clear_widgets()
+    def get_song_info(self, song_path):
+        try:
+            audio = File(song_path)
+            
+            if audio is None:
+                raise ValueError("File could not be opened.")
+            
+            # Default values
+            title = os.path.basename(song_path)
+            artist = '-'
+            album = '-'
+            duration = 0
+
+            if isinstance(audio, MP3):
+                # Handling MP3 files
+                title = audio.get('title', [title])[0]
+                artist = audio.get('artist', [artist])[0]
+                album = audio.get('album', [album])[0]
+                duration = int(audio.info.length)
+            elif isinstance(audio, OggVorbis):
+                # Handling OGG files
+                title = audio.get('title', [title])[0]
+                artist = audio.get('artist', [artist])[0]
+                album = audio.get('album', [album])[0]
+                duration = int(audio.info.length)
+                
+            m, s = divmod(duration, 60)
+            duration = f'{m:02d}:{s:02d}'
+
+            return {
+                'title': title,
+                'artist': artist,
+                'album': album,
+                'duration': duration
+            }
+        except Exception as e:
+            print(f"Error: {e}")
+            return {
+                'title': os.path.basename(song_path),
+                'artist': '-',
+                'album': '-',
+                'duration': 0
+            }
+            
+    def update_song_table(self):
+        self.song_table.clear_widgets()
+
+        # Create headers
+        headers = ['Title', 'Artist', 'Album', 'Duration']
+        for header in headers:
+            self.song_table.add_widget(MDLabel(text=header, halign='center'))
+
+        # Add song info rows
         for song in self.library.songs:
-            item = MDIconButton(
-                icon="music-note",
-                text=os.path.basename(song),
-                theme_text_color="Custom",
-                text_color=get_color_from_hex("#FFFFFF"),
-                md_bg_color=get_color_from_hex("#1E1E1E"),
-                size_hint_y=None,
-                height=40
-            )
-            item.bind(on_press=lambda x, s=song: self.select_song(s))
-            self.song_list.add_widget(item)
+            song_info = self.get_song_info(song)
+            title_button = MDFlatButton(text=song_info['title'], size_hint_y=None, height=40)
+            title_button.bind(on_press=lambda x, s=song: self.select_song(s))
+            self.song_table.add_widget(title_button)
+
+            artist_label = MDLabel(text=song_info['artist'], halign='center')
+            self.song_table.add_widget(artist_label)
+
+            album_label = MDLabel(text=song_info['album'], halign='center')
+            self.song_table.add_widget(album_label)
+
+            duration_label = MDLabel(text=str(song_info['duration']), halign='center')
+            self.song_table.add_widget(duration_label)
 
     def select_song(self, song):
         self.current_song = song
