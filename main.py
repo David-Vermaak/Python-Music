@@ -20,47 +20,154 @@ import base64
 import json
 import os
 import random
+import sqlite3
+
 
 
 class MusicLibrary:
     def __init__(self):
-        self.library_file = 'music_library.json'
-        self.music_paths = self.load_library()
-        self.songs = self.scan_for_songs()
+        self.db_file = 'music_library.db'
+        self.init_db()
+        self.songs = self.load_songs()
 
-    def load_library(self):
-        if os.path.exists(self.library_file):
-            with open(self.library_file, 'r') as f:
-                return json.load(f)
-        return []
+    def init_db(self):
+        self.conn = sqlite3.connect(self.db_file)
+        self.cursor = self.conn.cursor()
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS songs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                song_name TEXT NOT NULL,
+                artist TEXT NOT NULL,
+                album TEXT NOT NULL,
+                duration INTEGER NOT NULL,
+                album_art_path TEXT NOT NULL
+            )
+        ''')
+        self.conn.commit()
+
+    def load_songs(self):
+        self.cursor.execute('SELECT * FROM songs')
+        rows = self.cursor.fetchall()
+        songs = []
+        for row in rows:
+            duration = row[4]
+            m, s = divmod(duration, 60)
+            duration = f'{m:02d}:{s:02d}'
+            songs.append({
+                'id': row[0],
+                'song_name': row[1],
+                'artist': row[2],
+                'album': row[3],
+                'duration': duration,
+                'album_art_path': row[5]
+            })
+        return songs
+
 
     def save_library(self):
         with open(self.library_file, 'w') as f:
             json.dump(self.music_paths, f)
 
     def add_path(self, path):
-        if path not in self.music_paths:
-            self.music_paths.append(path)
-            self.save_library()
-        self.songs = self.scan_for_songs()
+        if os.path.isdir(path):
+            for root, dirs, files in os.walk(path):
+                for file in files:
+                    if file.endswith(('.mp3', '.wav', '.ogg')):  # Add more formats if needed
+                        song_path = os.path.join(root, file)
+                        if not self.song_exists(song_path):
+                            metadata = self.get_song_metadata(song_path)
+                            self.cursor.execute('''
+                                INSERT INTO songs (song_name, artist, album, duration, album_art_path)
+                                VALUES (?, ?, ?, ?, ?)
+                            ''', (metadata['title'], metadata['artist'], metadata['album'], metadata['duration'], metadata['album_art']))
+                            self.conn.commit()
+        self.songs = self.load_songs()
 
-    def remove_path(self, path):
-        if path in self.music_paths:
-            self.music_paths.remove(path)
-            self.save_library()
-        self.songs = self.scan_for_songs()
+    def song_exists(self, song_path):
+        self.cursor.execute('SELECT * FROM songs WHERE song_name=?', (os.path.basename(song_path),))
+        return self.cursor.fetchone() is not None
 
-    def scan_for_songs(self):
-        songs = []
-        for path in self.music_paths:
-            if os.path.isfile(path):
-                songs.append(path)
-            elif os.path.isdir(path):
-                for root, dirs, files in os.walk(path):
-                    for file in files:
-                        if file.endswith(('.mp3', '.wav', '.ogg')):  # Add more formats if needed
-                            songs.append(os.path.join(root, file))
-        return songs
+    def initial_scan_and_add(self, path):
+        if os.path.isdir(path):
+            for root, dirs, files in os.walk(path):
+                for file in files:
+                    if file.endswith(('.mp3', '.wav', '.ogg')):  # Add more formats if needed
+                        song_path = os.path.join(root, file)
+                        if not self.song_exists(song_path):
+                            metadata = self.get_song_metadata(song_path)
+                            self.cursor.execute('''
+                                INSERT INTO songs (song_name, artist, album, duration, album_art_path)
+                                VALUES (?, ?, ?, ?, ?)
+                            ''', (metadata['title'], metadata['artist'], metadata['album'], metadata['duration'], metadata['album_art']))
+                            self.conn.commit()
+        elif os.path.isfile(path) and path.endswith(('.mp3', '.wav', '.ogg')):  # Add more formats if needed
+            if not self.song_exists(path):
+                metadata = self.get_song_metadata(path)
+                self.cursor.execute('''
+                    INSERT INTO songs (song_name, artist, album, duration, album_art_path)
+                    VALUES (?, ?, ?, ?, ?)
+                ''', (metadata['title'], metadata['artist'], metadata['album'], metadata['duration'], metadata['album_art']))
+                self.conn.commit()
+        self.songs = self.load_songs()
+
+    def get_song_metadata(self, song_path):
+        try:
+            audio = File(song_path)
+            
+            if audio is None:
+                raise ValueError("File could not be opened.")
+            
+            # Default metadata values
+            title = os.path.basename(song_path)
+            artist = 'Unknown Artist'
+            album = 'Unknown Album'
+            album_art = None
+            duration = 0
+
+            if 'APIC:' in audio:
+                artwork = audio['APIC:'].data
+                with NamedTemporaryFile(delete=False, suffix='.jpg') as temp_file:
+                    temp_file.write(artwork)
+                    album_art = temp_file.name
+                    print(f"Album art saved to {album_art}")
+            
+            if isinstance(audio, ID3):
+                # Handling MP3 files
+                title = audio.tags.get('TIT2', title).text[0]
+                artist = audio.tags.get('TPE1', artist).text[0]
+                album = audio.tags.get('TALB', album).text[0]
+                duration = int(audio.info.length)
+                m, s = divmod(duration, 60)
+                duration = f'{m:02d}:{s:02d}'
+                
+                # Extract album art
+                for tag in audio.tags.values():
+                    if isinstance(tag, APIC):
+                        artwork = tag.data
+                        with NamedTemporaryFile(delete=False, suffix='.jpg') as temp_file:
+                            temp_file.write(artwork)
+                            album_art = temp_file.name
+                            print(f"Album art saved to {album_art}")
+                        break
+            
+            return {
+                'title': title,
+                'artist': artist,
+                'album': album,
+                'duration': duration,
+                'album_art': album_art
+            }
+        except Exception as e:
+            print(f"Error: {e}")
+            return {
+                'title': os.path.basename(song_path),
+                'artist': 'Unknown Artist',
+                'album': 'Unknown Album',
+                'duration': 0,
+                'album_art': None
+            }
+
+
 
 
 class MusicPlayer(BoxLayout):
@@ -178,9 +285,7 @@ class MusicPlayer(BoxLayout):
         self.update_song_table()
 
     def add_to_queue(self, song):
-        self.play_queue.append(song)
-        if len(self.play_queue) == 1:
-            self.play_song()
+        self.play_queue.insert(0, song)
 
     def play_pause_music(self, instance):
 
@@ -205,6 +310,7 @@ class MusicPlayer(BoxLayout):
 
     def play_song(self):
         if self.play_queue:
+            print( "\n\n", self.play_queue, '\n\n')
             self.current_song = self.play_queue.pop(0)
             metadata = self.get_song_metadata(self.current_song)
             self.now_playing_title.text = metadata['title']
@@ -232,78 +338,11 @@ class MusicPlayer(BoxLayout):
     def update_play_queue(self):
         self.play_queue = list(self.library.songs)  # Reset queue to original or shuffled list
         self.play_song()  # Start playing the first song in the updated queue
-
-    def get_song_metadata(self, song_path):
-        try:
-            audio = File(song_path)
-            
-            if audio is None:
-                raise ValueError("File could not be opened.")
-            
-            # Default metadata values
-            title = os.path.basename(song_path)
-            artist = 'Unknown Artist'
-            album = 'Unknown Album'
-            album_art = None
-
-            if 'APIC:' in audio:
-                artwork = audio['APIC:'].data
-                with NamedTemporaryFile(delete=False, suffix='.jpg') as temp_file:
-                    temp_file.write(artwork)
-                    album_art = temp_file.name
-                    print(f"Album art saved to {album_art}")
-            else:
-                print("No album art available.")
-            
-            if isinstance(audio, ID3):
-                # Handling MP3 files
-                title = audio.tags.get('TIT2', title).text[0]
-                artist = audio.tags.get('TPE1', artist).text[0]
-                album = audio.tags.get('TALB', album).text[0]
-                
-                # Extract album art
-                for tag in audio.tags.values():
-                    if isinstance(tag, APIC):
-                        artwork = tag.data
-                        with NamedTemporaryFile(delete=False, suffix='.jpg') as temp_file:
-                            temp_file.write(artwork)
-                            album_art = temp_file.name
-                            print(f"Album art saved to {album_art}")
-                        break
-            elif isinstance(audio, OggVorbis):
-                # Handling OGG files
-                title = audio.get('title', [title])[0]
-                artist = audio.get('artist', [artist])[0]
-                album = audio.get('album', [album])[0]
-                
-                # OGG files can store album art in a different way
-                if 'metadata_block_picture' in audio:
-                    artwork_base64 = audio['metadata_block_picture'][0]
-                    artwork = base64.b64decode(artwork_base64)
-                    with NamedTemporaryFile(delete=False, suffix='.jpg') as temp_file:
-                        temp_file.write(artwork)
-                        album_art = temp_file.name
-                        print(f"Album art saved to {album_art}")
-            
-            return {
-                'title': title,
-                'artist': artist,
-                'album': album,
-                'album_art': album_art
-            }
-        except Exception as e:
-            print(f"Error: {e}")
-            return {
-                'title': os.path.basename(song_path),
-                'artist': 'Unknown Artist',
-                'album': 'Unknown Album',
-                'album_art': None
-            }
             
     def add_music(self, instance):
         path = self.select_music_path()
         if path:
-            self.library.add_path(path)
+            self.library.initial_scan_and_add(path)
             self.update_song_table()
 
     def select_music_path(self):
@@ -320,51 +359,7 @@ class MusicPlayer(BoxLayout):
         except Exception as e:
             print(f"Error selecting path: {e}")
             return None
-
-    def get_song_info(self, song_path):
-        try:
-            audio = File(song_path)
-            
-            if audio is None:
-                raise ValueError("File could not be opened.")
-            
-            # Default values
-            title = os.path.basename(song_path)
-            artist = '-'
-            album = '-'
-            duration = 0
-
-            if isinstance(audio, MP3):
-                # Handling MP3 files
-                title = audio.get('title', [title])[0]
-                artist = audio.get('artist', [artist])[0]
-                album = audio.get('album', [album])[0]
-                duration = int(audio.info.length)
-            elif isinstance(audio, OggVorbis):
-                # Handling OGG files
-                title = audio.get('title', [title])[0]
-                artist = audio.get('artist', [artist])[0]
-                album = audio.get('album', [album])[0]
-                duration = int(audio.info.length)
-                
-            m, s = divmod(duration, 60)
-            duration = f'{m:02d}:{s:02d}'
-
-            return {
-                'title': title,
-                'artist': artist,
-                'album': album,
-                'duration': duration
-            }
-        except Exception as e:
-            print(f"Error: {e}")
-            return {
-                'title': os.path.basename(song_path),
-                'artist': '-',
-                'album': '-',
-                'duration': 0
-            }
-            
+  
     def update_song_table(self):
         self.song_table.clear_widgets()
 
@@ -375,18 +370,18 @@ class MusicPlayer(BoxLayout):
 
         # Add song info rows
         for song in self.library.songs:
-            song_info = self.get_song_info(song)
-            title_button = MDFlatButton(text=song_info['title'], size_hint_y=None, height=40)
-            title_button.bind(on_press=lambda x, s=song: self.add_to_queue(s))
+            self.add_to_queue(song['song_name'])
+            title_button = MDFlatButton(text=song['song_name'], size_hint_y=None, height=40)
+            title_button.bind(on_press=lambda x, s=song['song_name']: self.add_to_queue(s))
             self.song_table.add_widget(title_button)
 
-            artist_label = MDLabel(text=song_info['artist'], halign='center')
+            artist_label = MDLabel(text=song['artist'], halign='center')
             self.song_table.add_widget(artist_label)
 
-            album_label = MDLabel(text=song_info['album'], halign='center')
+            album_label = MDLabel(text=song['album'], halign='center')
             self.song_table.add_widget(album_label)
 
-            duration_label = MDLabel(text=str(song_info['duration']), halign='center')
+            duration_label = MDLabel(text=song['duration'], halign='center')
             self.song_table.add_widget(duration_label)
 
     def next_song(self, instance):
